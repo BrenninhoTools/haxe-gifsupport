@@ -20,7 +20,7 @@ class GifBitmap extends Bitmap
 	public var playing(get, never):Bool;
 
 	var frameBitmaps:Array<BitmapData>;
-	var lastTime:Int = 0;
+	var lastTime:Float = 0;
 
 	public function new(gif:Gif, autoPlay:Bool = true, smoothing:Bool = false)
 	{
@@ -119,7 +119,7 @@ class GifBitmap extends Bitmap
 
 	function onEnterFrame(_):Void
 	{
-		var now = Lib.getTimer();
+		var now:Float = Lib.getTimer();
 		var elapsed = now - lastTime;
 		lastTime = now;
 
