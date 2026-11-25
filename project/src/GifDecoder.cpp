@@ -156,7 +156,7 @@ namespace hxgif
 		}
 	}
 
-	GifDecoder::GifDecoder() : width(0), height(0), loopCount(-1)
+	GifDecoder::GifDecoder() : width(0), height(0), loopCount(-1), version(89), backgroundColor(-1), aspectRatio(0)
 	{
 	}
 
@@ -165,7 +165,11 @@ namespace hxgif
 		width = 0;
 		height = 0;
 		loopCount = -1;
+		version = 89;
+		backgroundColor = -1;
+		aspectRatio = 0;
 		error.clear();
+		comments.clear();
 		frames.clear();
 	}
 
@@ -177,7 +181,7 @@ namespace hxgif
 		return std::memcmp(data, "GIF87a", 6) == 0 || std::memcmp(data, "GIF89a", 6) == 0;
 	}
 
-	bool GifDecoder::decode(const uint8_t* data, int length)
+	bool GifDecoder::decode(const uint8_t* data, int length, int maxFrames)
 	{
 		clear();
 
@@ -190,6 +194,9 @@ namespace hxgif
 		int canvasWidth = readShort(data, 6);
 		int canvasHeight = readShort(data, 8);
 		int screenFlags = data[10];
+		int backgroundIndex = data[11];
+		aspectRatio = data[12];
+		version = data[4] == '7' ? 87 : 89;
 		int position = 13;
 
 		std::vector<uint8_t> globalPalette;
@@ -203,6 +210,12 @@ namespace hxgif
 			}
 			globalPalette.assign(data + position, data + position + size * 3);
 			position += size * 3;
+
+			if (backgroundIndex < size)
+			{
+				const uint8_t* color = globalPalette.data() + backgroundIndex * 3;
+				backgroundColor = (int)(0xFF000000u | ((uint32_t)color[0] << 16) | ((uint32_t)color[1] << 8) | (uint32_t)color[2]);
+			}
 		}
 
 		int pendingDelay = 0;
@@ -212,6 +225,9 @@ namespace hxgif
 
 		while (position < length)
 		{
+			if (maxFrames > 0 && (int)rawFrames.size() >= maxFrames)
+				break;
+
 			int block = data[position++];
 
 			if (block == 0x3B)
@@ -240,6 +256,21 @@ namespace hxgif
 						if (sub + 4 <= length && data[sub] >= 3 && (data[sub + 1] & 7) == 1)
 							loopCount = readShort(data, sub + 2);
 					}
+				}
+				else if (label == 0xFE)
+				{
+					std::string text;
+					int sub = position;
+					while (sub < length)
+					{
+						int size = data[sub++];
+						if (size == 0)
+							break;
+						int available = std::min(size, length - sub);
+						text.append((const char*)(data + sub), (size_t)available);
+						sub += available;
+					}
+					comments.push_back(std::move(text));
 				}
 
 				position = skipSubBlocks(data, length, position);
@@ -396,6 +427,7 @@ namespace hxgif
 			frame.width = raw.width;
 			frame.height = raw.height;
 			frame.disposal = raw.disposal;
+			frame.interlaced = raw.interlaced;
 			frames.push_back(std::move(frame));
 
 			if (raw.disposal == 2)
@@ -447,6 +479,76 @@ namespace hxgif
 		if (index < 0 || index >= (int)frames.size())
 			return 0;
 		return frames[index].disposal;
+	}
+
+	int GifDecoder::getVersion() const
+	{
+		return version;
+	}
+
+	int GifDecoder::getBackgroundColor() const
+	{
+		return backgroundColor;
+	}
+
+	int GifDecoder::getAspectRatio() const
+	{
+		return aspectRatio;
+	}
+
+	int GifDecoder::getCommentCount() const
+	{
+		return (int)comments.size();
+	}
+
+	int GifDecoder::getCommentLength(int index) const
+	{
+		if (index < 0 || index >= (int)comments.size())
+			return 0;
+		return (int)comments[index].size();
+	}
+
+	bool GifDecoder::copyComment(int index, uint8_t* destination) const
+	{
+		if (destination == nullptr || index < 0 || index >= (int)comments.size())
+			return false;
+		std::memcpy(destination, comments[index].data(), comments[index].size());
+		return true;
+	}
+
+	int GifDecoder::getFrameLeft(int index) const
+	{
+		if (index < 0 || index >= (int)frames.size())
+			return 0;
+		return frames[index].left;
+	}
+
+	int GifDecoder::getFrameTop(int index) const
+	{
+		if (index < 0 || index >= (int)frames.size())
+			return 0;
+		return frames[index].top;
+	}
+
+	int GifDecoder::getFrameWidth(int index) const
+	{
+		if (index < 0 || index >= (int)frames.size())
+			return 0;
+		return frames[index].width;
+	}
+
+	int GifDecoder::getFrameHeight(int index) const
+	{
+		if (index < 0 || index >= (int)frames.size())
+			return 0;
+		return frames[index].height;
+	}
+
+	bool GifDecoder::getFrameInterlaced(int index) const
+	{
+		if (index < 0 || index >= (int)frames.size())
+			return false;
+		return frames[index].interlaced;
 	}
 
 	bool GifDecoder::copyFrame(int index, uint8_t* destination) const

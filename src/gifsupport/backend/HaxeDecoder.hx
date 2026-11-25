@@ -1,187 +1,29 @@
 package gifsupport.backend;
 
+import gifsupport.backend.GifParser;
 import haxe.ds.Vector;
 import haxe.io.Bytes;
 
-private class RawFrame
-{
-	public var left:Int = 0;
-	public var top:Int = 0;
-	public var width:Int = 0;
-	public var height:Int = 0;
-	public var interlaced:Bool = false;
-	public var delay:Int = 0;
-	public var disposal:Int = 0;
-	public var transparentIndex:Int = -1;
-	public var minCodeSize:Int = 0;
-	public var palette:Bytes = null;
-	public var data:Bytes = null;
-
-	public function new() {}
-}
-
 class HaxeDecoder
 {
-	static inline var MAX_CANVAS_PIXELS:Int = 1 << 26;
-
-	public static function decode(bytes:Bytes):Gif
+	public static function decode(bytes:Bytes, maxFrames:Int = 0):Gif
 	{
-		var length = bytes.length;
-
-		if (length < 13 || !Gif.isGif(bytes))
-			throw new GifException("Invalid GIF header");
-
-		var canvasWidth = bytes.getUInt16(6);
-		var canvasHeight = bytes.getUInt16(8);
-		var screenFlags = bytes.get(10);
-		var position = 13;
-
-		var globalPalette:Bytes = null;
-		if (screenFlags & 0x80 != 0)
-		{
-			var size = 2 << (screenFlags & 7);
-			if (position + size * 3 > length)
-				throw new GifException("Truncated global color table");
-			globalPalette = bytes.sub(position, size * 3);
-			position += size * 3;
-		}
-
-		var loopCount = -1;
-		var pendingDelay = 0;
-		var pendingDisposal = 0;
-		var pendingTransparent = -1;
-		var rawFrames = new Array<RawFrame>();
-
-		while (position < length)
-		{
-			var block = bytes.get(position++);
-
-			if (block == 0x3B)
-				break;
-
-			if (block == 0x21)
-			{
-				if (position >= length)
-					break;
-
-				var label = bytes.get(position++);
-
-				if (label == 0xF9 && position + 5 <= length && bytes.get(position) >= 4)
-				{
-					var flags = bytes.get(position + 1);
-					pendingDisposal = (flags >> 2) & 7;
-					pendingDelay = bytes.getUInt16(position + 2);
-					pendingTransparent = (flags & 1) != 0 ? bytes.get(position + 4) : -1;
-				}
-				else if (label == 0xFF && position + 12 <= length && bytes.get(position) == 11)
-				{
-					var identifier = bytes.getString(position + 1, 11);
-					if (identifier == "NETSCAPE2.0" || identifier == "ANIMEXTS1.0")
-					{
-						var sub = position + 12;
-						if (sub + 4 <= length && bytes.get(sub) >= 3 && (bytes.get(sub + 1) & 7) == 1)
-							loopCount = bytes.getUInt16(sub + 2);
-					}
-				}
-
-				position = skipSubBlocks(bytes, position);
-				continue;
-			}
-
-			if (block == 0x2C)
-			{
-				if (position + 9 > length)
-					break;
-
-				var frame = new RawFrame();
-				frame.left = bytes.getUInt16(position);
-				frame.top = bytes.getUInt16(position + 2);
-				frame.width = bytes.getUInt16(position + 4);
-				frame.height = bytes.getUInt16(position + 6);
-				var flags = bytes.get(position + 8);
-				frame.interlaced = (flags & 0x40) != 0;
-				position += 9;
-
-				if (flags & 0x80 != 0)
-				{
-					var size = 2 << (flags & 7);
-					if (position + size * 3 > length)
-						break;
-					frame.palette = bytes.sub(position, size * 3);
-					position += size * 3;
-				}
-				else
-				{
-					frame.palette = globalPalette;
-				}
-
-				if (position >= length)
-					break;
-
-				frame.minCodeSize = bytes.get(position++);
-
-				var buffer = new haxe.io.BytesBuffer();
-				while (position < length)
-				{
-					var size = bytes.get(position++);
-					if (size == 0)
-						break;
-					var available = size < length - position ? size : length - position;
-					buffer.addBytes(bytes, position, available);
-					position += available;
-				}
-				frame.data = buffer.getBytes();
-
-				frame.delay = pendingDelay * 10;
-				if (frame.delay <= 10)
-					frame.delay = 100;
-				frame.disposal = pendingDisposal;
-				frame.transparentIndex = pendingTransparent;
-
-				pendingDelay = 0;
-				pendingDisposal = 0;
-				pendingTransparent = -1;
-
-				rawFrames.push(frame);
-				continue;
-			}
-
-			break;
-		}
-
-		if (rawFrames.length == 0)
-			throw new GifException("GIF contains no frames");
-
-		if (canvasWidth == 0 || canvasHeight == 0)
-		{
-			for (frame in rawFrames)
-			{
-				if (frame.left + frame.width > canvasWidth)
-					canvasWidth = frame.left + frame.width;
-				if (frame.top + frame.height > canvasHeight)
-					canvasHeight = frame.top + frame.height;
-			}
-		}
-
-		var canvasPixels:Float = canvasWidth * 1.0 * canvasHeight;
-		if (canvasPixels <= 0 || canvasPixels > MAX_CANVAS_PIXELS)
-			throw new GifException("Invalid GIF dimensions");
-
-		var width = canvasWidth;
-		var height = canvasHeight;
+		var parsed = GifParser.parse(bytes, true, maxFrames);
+		var width = parsed.width;
+		var height = parsed.height;
 		var canvas = Bytes.alloc(width * height * 4);
 		canvas.fill(0, canvas.length, 0);
 		var saved:Bytes = null;
 		var frames = new Array<GifFrame>();
 
-		for (raw in rawFrames)
+		for (raw in parsed.frames)
 		{
 			var framePixels:Float = raw.width * 1.0 * raw.height;
 
 			if (raw.disposal == 3)
 				saved = canvas.sub(0, canvas.length);
 
-			if (framePixels > 0 && framePixels <= MAX_CANVAS_PIXELS)
+			if (framePixels > 0 && framePixels <= GifParser.MAX_CANVAS_PIXELS)
 			{
 				var indices = Bytes.alloc(raw.width * raw.height);
 				var decoded = decompress(raw, indices);
@@ -209,7 +51,7 @@ class HaxeDecoder
 				}
 			}
 
-			frames.push(new GifFrame(canvas.sub(0, canvas.length), raw.delay, raw.disposal));
+			frames.push(new GifFrame(canvas.sub(0, canvas.length), raw.delay, raw.disposal, raw.left, raw.top, raw.width, raw.height, raw.interlaced));
 
 			if (raw.disposal == 2)
 			{
@@ -225,20 +67,8 @@ class HaxeDecoder
 			}
 		}
 
-		return new Gif(width, height, loopCount, frames);
-	}
-
-	static function skipSubBlocks(bytes:Bytes, position:Int):Int
-	{
-		var length = bytes.length;
-		while (position < length)
-		{
-			var size = bytes.get(position);
-			position += 1 + size;
-			if (size == 0)
-				return position;
-		}
-		return length;
+		return new Gif(width, height, parsed.loopCount, frames, parsed.version, parsed.backgroundColor,
+			GifParser.aspectRatioToFloat(parsed.aspectRatio), parsed.comments);
 	}
 
 	static function buildRowMap(height:Int, interlaced:Bool):Vector<Int>
@@ -267,7 +97,7 @@ class HaxeDecoder
 		return rowMap;
 	}
 
-	static function decompress(frame:RawFrame, indices:Bytes):Int
+	static function decompress(frame:ParsedFrame, indices:Bytes):Int
 	{
 		var total = indices.length;
 		var minCodeSize = frame.minCodeSize;

@@ -2,11 +2,11 @@
 	"name": "haxe-gifsupport",
 	"url": "https://github.com/BrenninhoTools/haxe-gifsupport",
 	"license": "MIT",
-	"tags": ["gif", "image", "animation", "decoder", "encoder", "cpp", "cross", "openfl", "flixel"],
+	"tags": ["gif", "image", "animation", "decoder", "encoder", "cpp", "cross", "openfl", "flixel", "spritesheet"],
 	"description": "GIF decoding and encoding for Haxe, with a native C++ backend on hxcpp and a pure Haxe fallback for every other target.",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"classPath": "src",
-	"releasenote": "Initial release.",
+	"releasenote": "GIF metadata, comments, probing, partial decoding, frame optimization, dithering, editing tools and sprite sheet export.",
 	"contributors": ["Brenninho123"],
 	"dependencies": {}
 }

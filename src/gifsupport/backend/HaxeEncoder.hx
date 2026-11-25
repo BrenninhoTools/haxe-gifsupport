@@ -61,12 +61,21 @@ class HaxeEncoder
 {
 	var width:Int;
 	var height:Int;
+	var optimize:Bool;
+	var dither:Bool;
+	var alphaThreshold:Int;
 	var output:BytesBuffer;
+	var canvas:Bytes;
+	var pending:Bytes;
+	var pendingDelay:Int = 0;
 
-	public function new(width:Int, height:Int, loopCount:Int)
+	public function new(width:Int, height:Int, loopCount:Int, optimize:Bool = true, dither:Bool = false, alphaThreshold:Int = 128)
 	{
 		this.width = width;
 		this.height = height;
+		this.optimize = optimize;
+		this.dither = dither;
+		this.alphaThreshold = alphaThreshold;
 		output = new BytesBuffer();
 
 		output.addString("GIF89a");
@@ -87,6 +96,12 @@ class HaxeEncoder
 			writeShort(loopCount);
 			output.addByte(0);
 		}
+
+		if (optimize)
+		{
+			canvas = Bytes.alloc(width * height * 4);
+			canvas.fill(0, canvas.length, 0);
+		}
 	}
 
 	inline function writeShort(value:Int):Void
@@ -95,26 +110,165 @@ class HaxeEncoder
 		output.addByte((value >> 8) & 0xFF);
 	}
 
+	public function addComment(text:Bytes):Void
+	{
+		if (text.length == 0)
+			return;
+
+		output.addByte(0x21);
+		output.addByte(0xFE);
+		var position = 0;
+		while (position < text.length)
+		{
+			var size = text.length - position < 255 ? text.length - position : 255;
+			output.addByte(size);
+			output.addBytes(text, position, size);
+			position += size;
+		}
+		output.addByte(0);
+	}
+
 	public function addFrame(rgba:Bytes, delay:Int):Void
 	{
-		var pixelCount = width * height;
+		var frame = normalize(rgba);
+
+		if (!optimize)
+		{
+			writeFrame(frame, delay, 2, 0, 0, width, height, null);
+			return;
+		}
+
+		if (pending != null)
+			flushPending(frame);
+
+		pending = frame;
+		pendingDelay = delay;
+	}
+
+	public function finish():Bytes
+	{
+		if (pending != null)
+			flushPending(null);
+
+		output.addByte(0x3B);
+		var result = output.getBytes();
+		output = null;
+		canvas = null;
+		return result;
+	}
+
+	function normalize(rgba:Bytes):Bytes
+	{
+		var size = width * height * 4;
+		var result = Bytes.alloc(size);
+		var position = 0;
+		while (position < size)
+		{
+			if (rgba.get(position + 3) < alphaThreshold)
+			{
+				result.setInt32(position, 0);
+			}
+			else
+			{
+				result.set(position, rgba.get(position));
+				result.set(position + 1, rgba.get(position + 1));
+				result.set(position + 2, rgba.get(position + 2));
+				result.set(position + 3, 255);
+			}
+			position += 4;
+		}
+		return result;
+	}
+
+	function flushPending(next:Bytes):Void
+	{
+		var needsClear = false;
+		if (next != null)
+		{
+			var position = 3;
+			var size = width * height * 4;
+			while (position < size)
+			{
+				if (next.get(position) == 0 && pending.get(position) != 0)
+				{
+					needsClear = true;
+					break;
+				}
+				position += 4;
+			}
+		}
+
+		if (needsClear)
+		{
+			writeFrame(pending, pendingDelay, 2, 0, 0, width, height, canvas);
+			canvas.fill(0, canvas.length, 0);
+		}
+		else
+		{
+			var left = width;
+			var top = height;
+			var right = -1;
+			var bottom = -1;
+			for (y in 0...height)
+			{
+				for (x in 0...width)
+				{
+					var position = (y * width + x) * 4;
+					if (pending.getInt32(position) != canvas.getInt32(position))
+					{
+						if (x < left)
+							left = x;
+						if (x > right)
+							right = x;
+						if (y < top)
+							top = y;
+						if (y > bottom)
+							bottom = y;
+					}
+				}
+			}
+
+			if (right < 0)
+			{
+				left = 0;
+				top = 0;
+				right = 0;
+				bottom = 0;
+			}
+
+			writeFrame(pending, pendingDelay, 1, left, top, right - left + 1, bottom - top + 1, canvas);
+			canvas = pending;
+		}
+
+		pending = null;
+	}
+
+	function writeFrame(frame:Bytes, delay:Int, disposal:Int, regionX:Int, regionY:Int, regionWidth:Int, regionHeight:Int, compare:Bytes):Void
+	{
+		var count = regionWidth * regionHeight;
+		var colors = new Vector<Int>(count);
 		var hasTransparency = false;
 		var exact = new Map<Int, Int>();
 		var exactCount = 0;
 		var exactFits = true;
 
-		for (i in 0...pixelCount)
+		for (row in 0...regionHeight)
 		{
-			var position = i * 4;
-			if (rgba.get(position + 3) < 128)
+			for (column in 0...regionWidth)
 			{
-				hasTransparency = true;
-				continue;
-			}
-			if (exactFits)
-			{
-				var key = (rgba.get(position) << 16) | (rgba.get(position + 1) << 8) | rgba.get(position + 2);
-				if (!exact.exists(key))
+				var n = row * regionWidth + column;
+				var position = ((regionY + row) * width + regionX + column) * 4;
+				var value = frame.getInt32(position);
+				if (frame.get(position + 3) == 0 || (compare != null && compare.getInt32(position) == value))
+				{
+					colors[n] = -1;
+					hasTransparency = true;
+					continue;
+				}
+
+				var key = (frame.get(position) << 16) | (frame.get(position + 1) << 8) | frame.get(position + 2);
+				colors[n] = key;
+				if (exactFits && !exact.exists(key))
 				{
 					exact.set(key, exactCount++);
 					if (exactCount > 256)
@@ -148,14 +302,14 @@ class HaxeEncoder
 			for (i in 0...histogram.length)
 				histogram[i] = 0;
 
-			for (i in 0...pixelCount)
+			for (i in 0...count)
 			{
-				var position = i * 4;
-				if (rgba.get(position + 3) < 128)
+				var color = colors[i];
+				if (color < 0)
 					continue;
-				var r = rgba.get(position);
-				var g = rgba.get(position + 1);
-				var b = rgba.get(position + 2);
+				var r = (color >> 16) & 0xFF;
+				var g = (color >> 8) & 0xFF;
+				var b = color & 0xFF;
 				var key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
 				histogram[key * 4] += r;
 				histogram[key * 4 + 1] += g;
@@ -166,10 +320,10 @@ class HaxeEncoder
 			var entries = new Array<ColorEntry>();
 			for (key in 0...32768)
 			{
-				var count = histogram[key * 4 + 3];
-				if (count == 0)
+				var total = histogram[key * 4 + 3];
+				if (total == 0)
 					continue;
-				entries.push(new ColorEntry(Std.int(histogram[key * 4] / count), Std.int(histogram[key * 4 + 1] / count), Std.int(histogram[key * 4 + 2] / count), count));
+				entries.push(new ColorEntry(Std.int(histogram[key * 4] / total), Std.int(histogram[key * 4 + 1] / total), Std.int(histogram[key * 4 + 2] / total), total));
 			}
 
 			medianCut(entries, maxColors, palette);
@@ -177,8 +331,8 @@ class HaxeEncoder
 			lookup = new Vector<Int>(32768);
 			for (key in 0...32768)
 			{
-				var count = histogram[key * 4 + 3];
-				lookup[key] = count == 0 ? 0 : nearestColor(palette, Std.int(histogram[key * 4] / count), Std.int(histogram[key * 4 + 1] / count), Std.int(histogram[key * 4 + 2] / count));
+				var total = histogram[key * 4 + 3];
+				lookup[key] = total == 0 ? -1 : nearestColor(palette, Std.int(histogram[key * 4] / total), Std.int(histogram[key * 4 + 1] / total), Std.int(histogram[key * 4 + 2] / total));
 			}
 		}
 
@@ -196,34 +350,43 @@ class HaxeEncoder
 		var tableBits = 1;
 		while ((1 << tableBits) < colorCount)
 			tableBits++;
-		while (palette.length < (1 << tableBits) * 3)
-			palette.push(0);
 
-		var indices = Bytes.alloc(pixelCount);
-		for (i in 0...pixelCount)
+		var indices = Bytes.alloc(count);
+		if (exactFits)
 		{
-			var position = i * 4;
-			if (rgba.get(position + 3) < 128)
+			for (i in 0...count)
 			{
-				indices.set(i, transparentIndex);
+				var color = colors[i];
+				indices.set(i, color < 0 ? transparentIndex : exact.get(color));
 			}
-			else if (exactFits)
+		}
+		else if (dither)
+		{
+			ditherIndices(colors, regionWidth, regionHeight, palette, lookup, transparentIndex, indices);
+		}
+		else
+		{
+			for (i in 0...count)
 			{
-				indices.set(i, exact.get((rgba.get(position) << 16) | (rgba.get(position + 1) << 8) | rgba.get(position + 2)));
-			}
-			else
-			{
-				var key = ((rgba.get(position) >> 3) << 10) | ((rgba.get(position + 1) >> 3) << 5) | (rgba.get(position + 2) >> 3);
+				var color = colors[i];
+				if (color < 0)
+				{
+					indices.set(i, transparentIndex);
+					continue;
+				}
+				var key = (((color >> 16) & 0xFF) >> 3) << 10 | (((color >> 8) & 0xFF) >> 3) << 5 | ((color & 0xFF) >> 3);
 				indices.set(i, lookup[key]);
 			}
 		}
+
+		while (palette.length < (1 << tableBits) * 3)
+			palette.push(0);
 
 		var centiseconds = Std.int((delay + 5) / 10);
 		if (centiseconds < 0)
 			centiseconds = 0;
 		if (centiseconds > 65535)
 			centiseconds = 65535;
-		var disposal = 2;
 
 		output.addByte(0x21);
 		output.addByte(0xF9);
@@ -234,10 +397,10 @@ class HaxeEncoder
 		output.addByte(0);
 
 		output.addByte(0x2C);
-		writeShort(0);
-		writeShort(0);
-		writeShort(width);
-		writeShort(height);
+		writeShort(regionX);
+		writeShort(regionY);
+		writeShort(regionWidth);
+		writeShort(regionHeight);
 		output.addByte(0x80 | (tableBits - 1));
 		for (value in palette)
 			output.addByte(value);
@@ -247,12 +410,74 @@ class HaxeEncoder
 		compress(indices, minCodeSize);
 	}
 
-	public function finish():Bytes
+	static function ditherIndices(colors:Vector<Int>, regionWidth:Int, regionHeight:Int, palette:Array<Int>, lookup:Vector<Int>, transparentIndex:Int,
+			indices:Bytes):Void
 	{
-		output.addByte(0x3B);
-		var result = output.getBytes();
-		output = null;
-		return result;
+		var stride = (regionWidth + 2) * 3;
+		var current = new Vector<Float>(stride);
+		var next = new Vector<Float>(stride);
+		for (i in 0...stride)
+		{
+			current[i] = 0;
+			next[i] = 0;
+		}
+
+		for (y in 0...regionHeight)
+		{
+			for (x in 0...regionWidth)
+			{
+				var n = y * regionWidth + x;
+				var color = colors[n];
+				if (color < 0)
+				{
+					indices.set(n, transparentIndex);
+					continue;
+				}
+
+				var e = (x + 1) * 3;
+				var r = clamp(((color >> 16) & 0xFF) + current[e]);
+				var g = clamp(((color >> 8) & 0xFF) + current[e + 1]);
+				var b = clamp((color & 0xFF) + current[e + 2]);
+
+				var key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+				var index = lookup[key];
+				if (index < 0)
+				{
+					index = nearestColor(palette, r, g, b);
+					lookup[key] = index;
+				}
+				indices.set(n, index);
+
+				var errorR = r - palette[index * 3];
+				var errorG = g - palette[index * 3 + 1];
+				var errorB = b - palette[index * 3 + 2];
+
+				current[e + 3] += errorR * 7 / 16;
+				current[e + 4] += errorG * 7 / 16;
+				current[e + 5] += errorB * 7 / 16;
+				next[e - 3] += errorR * 3 / 16;
+				next[e - 2] += errorG * 3 / 16;
+				next[e - 1] += errorB * 3 / 16;
+				next[e] += errorR * 5 / 16;
+				next[e + 1] += errorG * 5 / 16;
+				next[e + 2] += errorB * 5 / 16;
+				next[e + 3] += errorR / 16;
+				next[e + 4] += errorG / 16;
+				next[e + 5] += errorB / 16;
+			}
+
+			var swap = current;
+			current = next;
+			next = swap;
+			for (i in 0...stride)
+				next[i] = 0;
+		}
+	}
+
+	static inline function clamp(value:Float):Int
+	{
+		var result = Math.round(value);
+		return result < 0 ? 0 : (result > 255 ? 255 : result);
 	}
 
 	function compress(indices:Bytes, minCodeSize:Int):Void

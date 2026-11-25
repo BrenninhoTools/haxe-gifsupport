@@ -4,17 +4,18 @@ package gifsupport.backend;
 import cpp.NativeArray;
 import gifsupport.native.NativeGifDecoder;
 import gifsupport.native.NativeGifEncoder;
+import gifsupport.backend.GifParser;
 import haxe.io.Bytes;
 
 class NativeBackend
 {
-	public static function decode(bytes:Bytes):Gif
+	public static function decode(bytes:Bytes, maxFrames:Int):Gif
 	{
 		var decoder = NativeGifDecoder.create();
 
 		try
 		{
-			if (!decoder.decode(NativeArray.address(bytes.getData(), 0).constRaw, bytes.length))
+			if (!decoder.decode(NativeArray.address(bytes.getData(), 0).constRaw, bytes.length, maxFrames))
 				throw new GifException(decoder.getError().toString());
 
 			var width = decoder.getWidth();
@@ -26,10 +27,26 @@ class NativeBackend
 			{
 				var pixels = Bytes.alloc(size);
 				decoder.copyFrame(i, NativeArray.address(pixels.getData(), 0).raw);
-				frames.push(new GifFrame(pixels, decoder.getFrameDelay(i), decoder.getFrameDisposal(i)));
+				frames.push(new GifFrame(pixels, decoder.getFrameDelay(i), decoder.getFrameDisposal(i), decoder.getFrameLeft(i), decoder.getFrameTop(i),
+					decoder.getFrameWidth(i), decoder.getFrameHeight(i), decoder.getFrameInterlaced(i)));
 			}
 
-			var gif = new Gif(width, height, decoder.getLoopCount(), frames);
+			var comments = new Array<String>();
+			for (i in 0...decoder.getCommentCount())
+			{
+				var length = decoder.getCommentLength(i);
+				if (length == 0)
+				{
+					comments.push("");
+					continue;
+				}
+				var text = Bytes.alloc(length);
+				decoder.copyComment(i, NativeArray.address(text.getData(), 0).raw);
+				comments.push(text.getString(0, length));
+			}
+
+			var gif = new Gif(width, height, decoder.getLoopCount(), frames, decoder.getVersion() == 87 ? "GIF87a" : "GIF89a", decoder.getBackgroundColor(),
+				GifParser.aspectRatioToFloat(decoder.getAspectRatio()), comments);
 			NativeGifDecoder.destroy(decoder);
 			return gif;
 		}
@@ -46,10 +63,16 @@ class NativeEncoderHandle extends cpp.Finalizable
 {
 	var encoder:cpp.Star<NativeGifEncoder>;
 
-	public function new(width:Int, height:Int, loopCount:Int)
+	public function new(width:Int, height:Int, loopCount:Int, optimize:Bool, dither:Bool, alphaThreshold:Int)
 	{
 		super();
-		encoder = NativeGifEncoder.create(width, height, loopCount);
+		encoder = NativeGifEncoder.create(width, height, loopCount, optimize, dither, alphaThreshold);
+	}
+
+	public function addComment(text:Bytes):Void
+	{
+		if (!encoder.addComment(NativeArray.address(text.getData(), 0).constRaw, text.length))
+			throw new GifException("Failed to write comment");
 	}
 
 	public function addFrame(pixels:Bytes, delay:Int):Void

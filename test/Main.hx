@@ -25,6 +25,10 @@ class Main
 		testQuantizedRoundTrip();
 		testInvalidData();
 		testPlayback();
+		testMetadata();
+		testOptimizer();
+		testDither();
+		testUtilities();
 
 		Sys.println('$checks checks, $failures failures');
 		if (failures > 0)
@@ -216,5 +220,176 @@ class Main
 		var gif = Gif.fromFrames(1, 1, frames, 0);
 		check(gif.getFrameIndexAt(250) == 2, "frame index at time");
 		check(gif.getFrameIndexAt(310) == 0, "frame index wraps");
+	}
+
+	static function testMetadata()
+	{
+		var fixture = Base64.decode(FIXTURE);
+		var gif = Gif.fromBytes(fixture);
+		check(gif.version == "GIF89a", 'fixture version ${gif.version}');
+		check(gif.backgroundColor == 0xFF000000, 'fixture background ${gif.backgroundColor}');
+		check(gif.pixelAspectRatio == 0, "fixture aspect unspecified");
+		check(gif.frames[0].regionWidth == 24 && gif.frames[0].regionHeight == 18, "fixture frame region");
+
+		var patched = fixture.sub(0, fixture.length);
+		patched.set(12, 49);
+		check(Gif.fromBytes(patched).pixelAspectRatio == 1, "patched aspect ratio");
+
+		var info = Gif.probe(fixture);
+		check(info.width == 24 && info.height == 18, "probe size");
+		check(info.numFrames == 4 && info.animated, 'probe frames ${info.numFrames}');
+		check(info.loopCount == 2 && info.playCount == 3, "probe loop");
+		check(info.duration == gif.duration, 'probe duration ${info.duration}');
+		check(info.decodedSize == 24 * 18 * 4 * 4, "probe decoded size");
+
+		var limited = Gif.fromBytes(fixture, 2);
+		check(limited.numFrames == 2, 'max frames ${limited.numFrames}');
+		check(normalizedCrc(limited.frames[1].pixels) == FIXTURE_CRCS[1], "max frames pixels");
+		check(Gif.firstFrame(fixture).numFrames == 1, "first frame only");
+
+		var frame = makeFrame(16, 16, 1, false);
+		var encoded = new GifEncoder(16, 16).addComment("hello gif").addFrame(frame).addComment("é ünïcode").addFrame(makeFrame(16, 16, 2, false)).finish();
+		var decoded = Gif.fromBytes(encoded);
+		check(decoded.comments.length == 2, 'comment count ${decoded.comments.length}');
+		check(decoded.comments[0] == "hello gif" && decoded.comments[1] == "é ünïcode", 'comments ${decoded.comments}');
+		check(Gif.probe(encoded).comments.length == 2, "probe comments");
+
+		var long = StringTools.lpad("", "x", 700);
+		var reencoded = Gif.fromBytes(new GifEncoder(16, 16).addComment(long).addFrame(frame).finish());
+		check(reencoded.comments[0] == long, "long comment split into sub-blocks");
+		check(Gif.fromBytes(reencoded.encode()).comments[0] == long, "comments survive re-encode");
+	}
+
+	static function testOptimizer()
+	{
+		var width = 64;
+		var height = 48;
+		var base = makeFrame(width, height, 0, false);
+		var source = new Array<Bytes>();
+		for (i in 0...6)
+		{
+			var frame = base.sub(0, base.length);
+			for (y in 10...18)
+				for (x in 0...8)
+				{
+					var position = (y * width + x + i * 6) * 4;
+					frame.set(position, 255);
+					frame.set(position + 1, 255);
+					frame.set(position + 2, 0);
+				}
+			source.push(frame);
+		}
+
+		var optimized = new GifEncoder(width, height);
+		var plain = new GifEncoder(width, height, 0, {optimize: false});
+		for (frame in source)
+		{
+			optimized.addFrame(frame, 80);
+			plain.addFrame(frame, 80);
+		}
+		var optimizedBytes = optimized.finish();
+		var plainBytes = plain.finish();
+		check(optimizedBytes.length < plainBytes.length, 'optimized ${optimizedBytes.length} < plain ${plainBytes.length}');
+
+		var gif = Gif.fromBytes(optimizedBytes);
+		check(gif.numFrames == source.length, "optimized frame count");
+		for (i in 0...source.length)
+			check(sameVisible(source[i], gif.frames[i].pixels), 'optimized frame $i pixels');
+		check(gif.frames[1].regionWidth < width && gif.frames[1].regionHeight < height, 'optimized region ${gif.frames[1].regionWidth}x${gif.frames[1].regionHeight}');
+
+		var still = new GifEncoder(8, 8).addFrame(makeFrame(8, 8, 3, false)).addFrame(makeFrame(8, 8, 3, false)).finish();
+		var stillGif = Gif.fromBytes(still);
+		check(stillGif.numFrames == 2 && sameVisible(stillGif.frames[0].pixels, stillGif.frames[1].pixels), "identical frames");
+
+		var empty = Bytes.alloc(8 * 8 * 4);
+		empty.fill(0, empty.length, 0);
+		var vanish = Gif.fromBytes(new GifEncoder(8, 8).addFrame(makeFrame(8, 8, 1, false)).addFrame(empty).addFrame(makeFrame(8, 8, 2, true)).finish());
+		check(sameVisible(empty, vanish.frames[1].pixels), "frame clears to transparent");
+		check(sameVisible(makeFrame(8, 8, 2, true), vanish.frames[2].pixels), "frame after clear");
+
+		var soft = Bytes.alloc(4);
+		soft.set(3, 100);
+		var lowThreshold = Gif.fromBytes(new GifEncoder(1, 1, 0, {alphaThreshold: 50}).addFrame(soft).finish());
+		check(lowThreshold.frames[0].pixels.get(3) == 255, "alpha threshold keeps pixel");
+		var highThreshold = Gif.fromBytes(new GifEncoder(1, 1).addFrame(soft).finish());
+		check(highThreshold.frames[0].pixels.get(3) == 0, "default threshold drops pixel");
+	}
+
+	static function testDither()
+	{
+		var width = 128;
+		var height = 64;
+		var pixels = Bytes.alloc(width * height * 4);
+		for (y in 0...height)
+			for (x in 0...width)
+			{
+				var position = (y * width + x) * 4;
+				pixels.set(position, x * 2);
+				pixels.set(position + 1, y * 4);
+				pixels.set(position + 2, (x + y) & 0xFF);
+				pixels.set(position + 3, x < 4 ? 0 : 255);
+			}
+
+		var gif = Gif.fromBytes(new GifEncoder(width, height, 0, {dither: true}).addFrame(pixels).finish());
+		var alphaMatches = true;
+		var error = 0.0;
+		var visible = 0;
+		for (i in 0...width * height)
+		{
+			var a = pixels.get(i * 4 + 3) >= 128;
+			if (a != (gif.frames[0].pixels.get(i * 4 + 3) > 0))
+				alphaMatches = false;
+			if (a)
+			{
+				for (c in 0...3)
+					error += Math.abs(pixels.get(i * 4 + c) - gif.frames[0].pixels.get(i * 4 + c));
+				visible++;
+			}
+		}
+		check(alphaMatches, "dither alpha matches");
+		check(error / (visible * 3) < 20, 'dither mean error ${error / (visible * 3)}');
+	}
+
+	static function testUtilities()
+	{
+		var gif = Gif.fromBytes(Base64.decode(FIXTURE));
+
+		var sliced = gif.slice(1, 3);
+		check(sliced.numFrames == 2 && normalizedCrc(sliced.frames[0].pixels) == FIXTURE_CRCS[1], "slice");
+		check(sliced.loopCount == gif.loopCount, "slice keeps loop");
+
+		var reversed = gif.reverse();
+		check(normalizedCrc(reversed.frames[0].pixels) == FIXTURE_CRCS[3] && reversed.frames[3] == gif.frames[0], "reverse");
+
+		var faster = gif.withSpeed(2);
+		check(faster.frames[1].delay == 60, 'speed ${faster.frames[1].delay}');
+		check(gif.withSpeed(100).frames[0].delay == 20, "speed minimum delay");
+
+		var cropped = gif.crop(4, 2, 10, 8);
+		check(cropped.width == 10 && cropped.height == 8 && cropped.frames[0].pixels.length == 320, "crop size");
+		check(cropped.frames[2].getPixel(10, 3, 5) == gif.frames[2].getPixel(24, 7, 7), "crop pixel");
+
+		var resized = gif.resize(48, 36);
+		check(resized.width == 48 && resized.height == 36, "resize size");
+		check(resized.frames[1].getPixel(48, 21, 13) == gif.frames[1].getPixel(24, 10, 6), "resize pixel");
+		check(Gif.fromBytes(resized.encode()).numFrames == 4, "resized encodes");
+
+		var sheet = gif.toSpriteSheet(2, 1);
+		check(sheet.columns == 2 && sheet.rows == 2, "sheet grid");
+		check(sheet.width == 49 && sheet.height == 37, 'sheet size ${sheet.width}x${sheet.height}');
+		check(sheet.frames[3].x == 25 && sheet.frames[3].y == 19, "sheet frame position");
+		var sheetPixel = sheet.pixels.getInt32(((19 + 5) * sheet.width + 25 + 7) * 4);
+		check(sheetPixel == gif.frames[3].pixels.getInt32((5 * 24 + 7) * 4), "sheet pixel");
+
+		var xml = Xml.parse(sheet.toSparrowXml("dance.png", "dance")).firstElement();
+		var subTextures = [for (node in xml.elementsNamed("SubTexture")) node];
+		check(xml.get("imagePath") == "dance.png" && subTextures.length == 4, "sparrow xml");
+		check(subTextures[3].get("name") == "dance0003" && subTextures[3].get("x") == "25", "sparrow frame");
+
+		var json:Dynamic = haxe.Json.parse(sheet.toJson("dance.png"));
+		check(json.frames.length == 4 && json.frames[1].duration == 120, "sheet json");
+
+		var auto = gif.toSpriteSheet();
+		check(auto.columns * auto.rows >= 4, "auto columns");
 	}
 }

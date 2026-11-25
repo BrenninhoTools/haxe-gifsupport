@@ -57,9 +57,18 @@ class GifBitmap extends Bitmap
 
 	public static function toBitmapData(gif:Gif, index:Int):BitmapData
 	{
-		var pixels = gif.frames[index].pixels;
-		var data = UInt8Array.fromBytes(pixels.sub(0, pixels.length));
-		var buffer = new ImageBuffer(data, gif.width, gif.height, 32, PixelFormat.RGBA32);
+		return rgbaToBitmapData(gif.frames[index].pixels, gif.width, gif.height);
+	}
+
+	public static function spriteSheetToBitmapData(sheet:GifSpriteSheet):BitmapData
+	{
+		return rgbaToBitmapData(sheet.pixels, sheet.width, sheet.height);
+	}
+
+	public static function rgbaToBitmapData(pixels:Bytes, width:Int, height:Int):BitmapData
+	{
+		var data = UInt8Array.fromBytes(pixels.sub(0, width * height * 4));
+		var buffer = new ImageBuffer(data, width, height, 32, PixelFormat.RGBA32);
 		buffer.transparent = true;
 		return BitmapData.fromImage(new Image(buffer), true);
 	}

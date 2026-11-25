@@ -7,6 +7,9 @@ class GifEncoder
 	public var width(default, null):Int;
 	public var height(default, null):Int;
 	public var loopCount(default, null):Int;
+	public var optimize(default, null):Bool;
+	public var dither(default, null):Bool;
+	public var alphaThreshold(default, null):Int;
 	public var frameCount(default, null):Int = 0;
 	public var finished(default, null):Bool = false;
 
@@ -16,7 +19,7 @@ class GifEncoder
 	var backend:gifsupport.backend.HaxeEncoder;
 	#end
 
-	public function new(width:Int, height:Int, loopCount:Int = 0)
+	public function new(width:Int, height:Int, loopCount:Int = 0, ?options:GifEncoderOptions)
 	{
 		if (width <= 0 || height <= 0 || width > 65535 || height > 65535)
 			throw new GifException('Invalid GIF dimensions ${width}x$height');
@@ -24,12 +27,26 @@ class GifEncoder
 		this.width = width;
 		this.height = height;
 		this.loopCount = loopCount < 0 ? -1 : (loopCount > 65535 ? 65535 : loopCount);
+		optimize = options == null || options.optimize == null ? true : options.optimize;
+		dither = options != null && options.dither == true;
+		var threshold = options == null || options.alphaThreshold == null ? 128 : options.alphaThreshold;
+		alphaThreshold = threshold < 1 ? 1 : (threshold > 255 ? 255 : threshold);
 
 		#if (cpp && !gifsupport_pure_haxe)
-		backend = new gifsupport.backend.NativeBackend.NativeEncoderHandle(width, height, this.loopCount);
+		backend = new gifsupport.backend.NativeBackend.NativeEncoderHandle(width, height, this.loopCount, optimize, dither, alphaThreshold);
 		#else
-		backend = new gifsupport.backend.HaxeEncoder(width, height, this.loopCount);
+		backend = new gifsupport.backend.HaxeEncoder(width, height, this.loopCount, optimize, dither, alphaThreshold);
 		#end
+	}
+
+	public function addComment(text:String):GifEncoder
+	{
+		if (finished)
+			throw new GifException("Encoder already finished");
+
+		if (text != null && text.length > 0)
+			backend.addComment(Bytes.ofString(text));
+		return this;
 	}
 
 	public function addFrame(pixels:Bytes, delay:Int = 100):GifEncoder
