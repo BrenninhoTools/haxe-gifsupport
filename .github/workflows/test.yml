@@ -1,0 +1,54 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Haxe
+        uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: 4.3.6
+
+      - name: Install libraries
+        run: |
+          haxelib install hxcpp --quiet
+          haxelib install hxnodejs --quiet
+          haxelib dev haxe-gifsupport .
+
+      - name: Test interp
+        run: haxe test/interp.hxml
+
+      - name: Test neko
+        run: |
+          haxe test/neko.hxml
+          neko bin/test.n
+
+      - name: Test js
+        run: |
+          haxe test/js.hxml
+          node bin/test.js
+
+      - name: Test cpp native backend
+        run: |
+          haxe test/cpp.hxml
+          ./bin/cpp/Main
+
+      - name: Test cpp pure Haxe backend
+        run: |
+          haxe test/cpp-pure.hxml
+          ./bin/cpp-pure/Main

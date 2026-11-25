@@ -1,0 +1,19 @@
+<xml>
+	<section unless="HXGIF_BUILD_INCLUDED">
+		<set name="HXGIF_BUILD_INCLUDED" value="1" />
+
+		<files id="haxe">
+			<compilerflag value="-I${this_dir}/include" />
+		</files>
+
+		<files id="gifsupport" dir="${this_dir}">
+			<compilerflag value="-I${this_dir}/include" />
+			<file name="src/GifDecoder.cpp" />
+			<file name="src/GifEncoder.cpp" />
+		</files>
+
+		<target id="haxe">
+			<files id="gifsupport" />
+		</target>
+	</section>
+</xml>
