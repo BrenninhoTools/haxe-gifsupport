@@ -1,5 +1,8 @@
 #include "hxgif/GifEncoder.h"
 
+#include <cstdint>
+#include <vector>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -301,7 +304,45 @@ namespace hxgif
 		}
 	}
 
-	GifEncoder::GifEncoder(int width, int height, int loopCount, bool optimize, bool dither, int alphaThreshold)
+	class GifEncoderImpl
+	{
+	public:
+		GifEncoderImpl(int width, int height, int loopCount, bool optimize, bool dither, int alphaThreshold);
+
+		bool addComment(const uint8_t* text, int length);
+		bool addFrame(const uint8_t* rgba, int delay);
+		void finish();
+
+		int getWidth() const;
+		int getHeight() const;
+		int getFrameCount() const;
+		int getSize() const;
+		bool copyOutput(uint8_t* destination) const;
+
+	private:
+		int width;
+		int height;
+		int loopCount;
+		int frameCount;
+		bool finished;
+		bool optimize;
+		bool dither;
+		int alphaThreshold;
+		bool hasPending;
+		int pendingDelay;
+		std::vector<uint8_t> output;
+		std::vector<uint8_t> canvas;
+		std::vector<uint8_t> pending;
+
+		void writeByte(int value);
+		void writeShort(int value);
+		void writeHeader();
+		void normalize(const uint8_t* rgba, std::vector<uint8_t>& result) const;
+		void flushPending(const std::vector<uint8_t>* next);
+		void writeFrame(const std::vector<uint8_t>& frame, int delay, int disposal, int regionX, int regionY, int regionWidth, int regionHeight, const std::vector<uint8_t>* compare);
+	};
+
+	GifEncoderImpl::GifEncoderImpl(int width, int height, int loopCount, bool optimize, bool dither, int alphaThreshold)
 		: width(width), height(height), loopCount(loopCount), frameCount(0), finished(false), optimize(optimize), dither(dither),
 		  alphaThreshold(std::max(1, std::min(255, alphaThreshold))), hasPending(false), pendingDelay(0)
 	{
@@ -310,18 +351,18 @@ namespace hxgif
 			canvas.assign((size_t)width * (size_t)height * 4, 0);
 	}
 
-	void GifEncoder::writeByte(int value)
+	void GifEncoderImpl::writeByte(int value)
 	{
 		output.push_back((uint8_t)(value & 0xFF));
 	}
 
-	void GifEncoder::writeShort(int value)
+	void GifEncoderImpl::writeShort(int value)
 	{
 		writeByte(value);
 		writeByte(value >> 8);
 	}
 
-	void GifEncoder::writeHeader()
+	void GifEncoderImpl::writeHeader()
 	{
 		const char* signature = "GIF89a";
 		output.insert(output.end(), signature, signature + 6);
@@ -345,7 +386,7 @@ namespace hxgif
 		}
 	}
 
-	bool GifEncoder::addComment(const uint8_t* text, int length)
+	bool GifEncoderImpl::addComment(const uint8_t* text, int length)
 	{
 		if (finished || text == nullptr || length < 0)
 			return false;
@@ -366,7 +407,7 @@ namespace hxgif
 		return true;
 	}
 
-	void GifEncoder::normalize(const uint8_t* rgba, std::vector<uint8_t>& result) const
+	void GifEncoderImpl::normalize(const uint8_t* rgba, std::vector<uint8_t>& result) const
 	{
 		size_t size = (size_t)width * (size_t)height * 4;
 		result.resize(size);
@@ -389,7 +430,7 @@ namespace hxgif
 		}
 	}
 
-	bool GifEncoder::addFrame(const uint8_t* rgba, int delay)
+	bool GifEncoderImpl::addFrame(const uint8_t* rgba, int delay)
 	{
 		if (finished || rgba == nullptr || width <= 0 || height <= 0)
 			return false;
@@ -414,7 +455,7 @@ namespace hxgif
 		return true;
 	}
 
-	void GifEncoder::flushPending(const std::vector<uint8_t>* next)
+	void GifEncoderImpl::flushPending(const std::vector<uint8_t>* next)
 	{
 		bool needsClear = false;
 		if (next != nullptr)
@@ -470,7 +511,7 @@ namespace hxgif
 		hasPending = false;
 	}
 
-	void GifEncoder::writeFrame(const std::vector<uint8_t>& frame, int delay, int disposal, int regionX, int regionY, int regionWidth, int regionHeight, const std::vector<uint8_t>* compare)
+	void GifEncoderImpl::writeFrame(const std::vector<uint8_t>& frame, int delay, int disposal, int regionX, int regionY, int regionWidth, int regionHeight, const std::vector<uint8_t>* compare)
 	{
 		size_t count = (size_t)regionWidth * (size_t)regionHeight;
 		std::vector<int> colors(count);
@@ -635,7 +676,7 @@ namespace hxgif
 		output.insert(output.end(), compressed.begin(), compressed.end());
 	}
 
-	void GifEncoder::finish()
+	void GifEncoderImpl::finish()
 	{
 		if (finished)
 			return;
@@ -649,32 +690,82 @@ namespace hxgif
 		pending.shrink_to_fit();
 	}
 
-	int GifEncoder::getWidth() const
+	int GifEncoderImpl::getWidth() const
 	{
 		return width;
 	}
 
-	int GifEncoder::getHeight() const
+	int GifEncoderImpl::getHeight() const
 	{
 		return height;
 	}
 
-	int GifEncoder::getFrameCount() const
+	int GifEncoderImpl::getFrameCount() const
 	{
 		return frameCount;
 	}
 
-	int GifEncoder::getSize() const
+	int GifEncoderImpl::getSize() const
 	{
 		return (int)output.size();
 	}
 
-	bool GifEncoder::copyOutput(uint8_t* destination) const
+	bool GifEncoderImpl::copyOutput(uint8_t* destination) const
 	{
 		if (destination == nullptr)
 			return false;
 		std::memcpy(destination, output.data(), output.size());
 		return true;
+	}
+
+	GifEncoder::GifEncoder(int width, int height, int loopCount, bool optimize, bool dither, int alphaThreshold)
+		: impl(new GifEncoderImpl(width, height, loopCount, optimize, dither, alphaThreshold))
+	{
+	}
+
+	GifEncoder::~GifEncoder()
+	{
+		delete impl;
+	}
+
+	bool GifEncoder::addComment(const unsigned char* text, int length)
+	{
+		return impl->addComment(text, length);
+	}
+
+	bool GifEncoder::addFrame(const unsigned char* rgba, int delay)
+	{
+		return impl->addFrame(rgba, delay);
+	}
+
+	void GifEncoder::finish()
+	{
+		impl->finish();
+	}
+
+	int GifEncoder::getWidth() const
+	{
+		return impl->getWidth();
+	}
+
+	int GifEncoder::getHeight() const
+	{
+		return impl->getHeight();
+	}
+
+	int GifEncoder::getFrameCount() const
+	{
+		return impl->getFrameCount();
+	}
+
+	int GifEncoder::getSize() const
+	{
+		return impl->getSize();
+	}
+
+	bool GifEncoder::copyOutput(unsigned char* destination) const
+	{
+		return impl->copyOutput(destination);
 	}
 
 	GifEncoder* createEncoder(int width, int height, int loopCount, bool optimize, bool dither, int alphaThreshold)
